@@ -30,18 +30,27 @@ def save_birthday(user_id, username, chat_id, date_str):
         upsert=True
     )
 
+
 async def check_birthdays():
     while True:
         today = datetime.now().strftime("%d-%m")
         users = collection.find({"birthday": {"$regex": f"^{today}"}})
         
         for user in users:
-            model = genai.GenerativeModel('gemini-pro')
-            prompt = f"{user['username']} ismli do'stimizning tug'ilgan kuni. Uni samimiy va hazil aralash tabriklab bering."
-            response = model.generate_content(prompt)
-            await bot.send_message(user['chat_id'], f"🎉 {response.text}")
+            try:
+                # AI orqali tabrik yaratishga urinish
+                model = genai.GenerativeModel('gemini-pro')
+                prompt = f"{user['username']} ismli do'stimizning tug'ilgan kuni. Uni samimiy tabriklab bering."
+                response = model.generate_content(prompt)
+                tabrik_matni = response.text
+            except Exception as e:
+                # Agar AI ishlamay qolsa (internet, limit yoki kalit xatosi), oddiy tabrik:
+                logging.error(f"AI xatosi: {e}")
+                tabrik_matni = f"Tug'ilgan kuningiz bilan, {user['username']}! Sizga uzoq umr va sihat-salomatlik tilayman! 🎉"
+
+            await bot.send_message(user['chat_id'], f"🎉 {tabrik_matni}")
         
-        await asyncio.sleep(86400) # Bir kunda bir marta tekshiradi
+        await asyncio.sleep(86400)
 
 # --- HANDLERLAR ---
 @dp.message_handler(commands=['start'])
