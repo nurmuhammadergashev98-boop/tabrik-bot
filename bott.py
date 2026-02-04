@@ -1,97 +1,81 @@
 import logging
 import asyncio
-import sqlite3
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram_calendar import dialog_cal_callback, DialogCalendar
 import google.generativeai as genai
+from pymongo import MongoClient
 
-# --- 1. SOZLAMALAR ---
-API_TOKEN = '7216327008:AAHODKTaw61YJwUn0jwWO1D-_mBkMkrRGoA' # O'zingizning to'liq tokeningizni qo'ying
-GEMINI_KEY = 'AIzaSyBIaB9RKMU50aBn26sbgiA33aJuQyhRJiI'
+# --- KONFIGURATSIYA ---
+API_TOKEN = '7216327008:AAHGw9r0p8m6m48pI6N7K0-S7hT7eX_T5c' # Tokeningiz
+genai.configure(api_key="AIzaSyBIaB9RKMU50aBn26sbgiA33aJuQyhRJiI") # Gemini keyni qo'ying
+MONGO_URL = "mongodb+srv://nurmuhammadergashev98_db_user:Xo4SsKMAzKPfgNuP@cluster0.4ren87b.mongodb.net/?retryWrites=true&w=majority"
 
-# AI ni sozlash
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# MongoDB ulanishi
+client = MongoClient(MONGO_URL)
+db = client['tabrik_bot_db']
+collection = db['users']
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-# --- 2. BAZA (GROUP_ID QO'SHILDI) ---
-conn = sqlite3.connect('birthdays.db', check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS users 
-                  (user_id INTEGER, chat_id INTEGER, full_name TEXT, bday TEXT)''')
-# Agar jadval bo'lsa, chat_id ustuni borligiga ishonch hosil qilamiz
-conn.commit()
+# --- FUNKSIYALAR ---
+def save_birthday(user_id, username, chat_id, date_str):
+    collection.update_one(
+        {"user_id": user_id, "chat_id": chat_id},
+        {"$set": {"username": username, "birthday": date_str}},
+        upsert=True
+    )
 
-# --- 3. KOMANDALAR ---
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="📅 Tug'ilgan kunimni qo'shish", callback_data="add_bday"))
-    await message.answer(f"Salom! Tug'ilgan kuningizni saqlash uchun pastdagi tugmani bosing.", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data == "add_bday")
-async def show_calendar(callback: types.CallbackQuery):
-    await callback.message.answer("Tug'ilgan kuningizni tanlang:", reply_markup=await SimpleCalendar().start_calendar())
-
-@dp.callback_query(SimpleCalendarCallback.filter())
-async def process_calendar(callback: types.CallbackQuery, callback_data: SimpleCalendarCallback):
-    calendar = SimpleCalendar()
-    selected, date = await calendar.process_selection(callback, callback_data)
-    if selected:
-        bday_str = date.strftime("%d.%m")
-        u_id = callback.from_user.id
-        c_id = callback.message.chat.id # Guruhning ID-si saqlanadi
-        name = callback.from_user.full_name
-        
-        # Eskisini o'chirib yangisini yozish
-        cursor.execute("DELETE FROM users WHERE user_id = ? AND chat_id = ?", (u_id, c_id))
-        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (u_id, c_id, name, bday_str))
-        conn.commit()
-        await callback.message.answer(f"✅ {name}, ushbu guruh uchun tug'ilgan kuningiz {bday_str} deb saqlandi!")
-
-# --- 4. AVTOMATIK TABRIKLASH (HAR BIR GURUHGA ALOHIDA) ---
-async def send_daily_congrats():
+async def check_birthdays():
     while True:
-        now = datetime.now()
-        # Soat 09:00 da tekshirish
-        if now.hour == 9 and now.minute == 0: 
-            today = now.strftime("%d.%m")
-            cursor.execute("SELECT full_name, chat_id FROM users WHERE bday = ?", (today,))
-            winners = cursor.fetchall()
-            
-            for name, chat_id in winners:
-                try:
-                    prompt = f"{name} ismli insonni tug'ilgan kuni bilan o'zbekcha juda chiroyli tabriklab ber."
-                    response = model.generate_content(prompt)
-                    
-                    if response and response.text:
-                        txt = response.text
-                    else:
-                        txt = f"Bugun {name}ning tug'ilgan kuni! 🎉"
-                    
-                    # Xabar aynan o'sha guruhga boradi
-                    await bot.send_message(chat_id, f"🎊 DIQQAT! 🎊\n\n{txt}")
-                    await asyncio.sleep(2) # Telegram limitidan oshib ketmaslik uchun
-                except Exception as e:
-                    logging.error(f"Xato: {e}")
-            
-            await asyncio.sleep(60)
-        await asyncio.sleep(30)
+        today = datetime.now().strftime("%d-%m")
+        users = collection.find({"birthday": {"$regex": f"^{today}"}})
+        
+        for user in users:
+            model = genai.GenerativeModel('gemini-pro')
+            prompt = f"{user['username']} ismli do'stimizning tug'ilgan kuni. Uni samimiy va hazil aralash tabriklab bering."
+            response = model.generate_content(prompt)
+            await bot.send_message(user['chat_id'], f"🎉 {response.text}")
+        
+        await asyncio.sleep(86400) # Bir kunda bir marta tekshiradi
 
-# --- 5. ISHGA TUSHIRISH ---
-async def main():
-    asyncio.create_task(send_daily_congrats())
-    print("Bot universal rejimda ishga tushdi...")
-    await dp.start_polling(bot)
+# --- HANDLERLAR ---
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
+    await message.answer(
+        f"Salom {message.from_user.full_name}! Tug'ilgan kuningizni saqlash uchun quyidagi tugmani bosing:",
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("Sana tanlash", callback_data="set_birthday")
+        )
+    )
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot to'xtatildi")
+@dp.callback_query_handler(lambda c: c.data == "set_birthday")
+async def process_callback_calendar(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(
+        callback_query.from_user.id,
+        "Tug'ilgan kuningizni tanlang:",
+        reply_markup=await DialogCalendar().start_calendar()
+    )
+
+@dp.callback_query_handler(dialog_cal_callback.filter())
+async def process_dialog_calendar(callback_query: types.CallbackQuery, callback_data: dict):
+    selected, date = await DialogCalendar().process_selection(callback_query, callback_data)
+    if selected:
+        date_str = date.strftime("%d-%m-%Y")
+        save_birthday(
+            callback_query.from_user.id,
+            callback_query.from_user.full_name,
+            callback_query.message.chat.id,
+            date_str
+        )
+        await bot.send_message(callback_query.from_user.id, f"Sana saqlandi: {date_str} ✅")
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_birthdays())
+    executor.start_polling(dp, skip_updates=True)
